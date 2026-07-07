@@ -1740,7 +1740,7 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
 
             if getattr(recv_obj, "output_hidden_states", None):
                 meta_info["hidden_states"] = recv_obj.output_hidden_states[i]
-            if getattr(recv_obj, "routed_experts", None):
+            if getattr(recv_obj, "routed_experts", None) and i < len(recv_obj.routed_experts):
                 val = recv_obj.routed_experts[i]
                 if val is not None:
                     # BatchStrOutput is pre-encoded by the detokenizer;

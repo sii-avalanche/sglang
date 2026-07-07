@@ -1237,10 +1237,14 @@ class SchedulerOutputProcessorMixin:
                     if output_hidden_states is None:
                         output_hidden_states = []
                     output_hidden_states.append(req.hidden_states)
-                if req.return_routed_experts:
-                    if routed_experts is None:
-                        routed_experts = []
-                    routed_experts.append(req.routed_experts)
+                # Index i of this list maps to req i, so a batch mixing opt-in and
+                # non-opt-in reqs needs None in the non-opt-in slots.
+                if req.return_routed_experts and routed_experts is None:
+                    routed_experts = [None] * (len(rids) - 1)
+                if routed_experts is not None:
+                    routed_experts.append(
+                        req.routed_experts if req.return_routed_experts else None
+                    )
                 if req.return_indexer_topk:
                     if indexer_topk is None:
                         indexer_topk = []
