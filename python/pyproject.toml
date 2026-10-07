@@ -40,6 +40,7 @@ dependencies = [
   "fastapi",
   "flash-attn-4>=4.0.0b18",
   "flashinfer_python[cu13]==0.6.18", # keep it aligned with jit-cache version in Dockerfile
+  "flashinfer-jit-cache==0.6.18+cu130",
   "gguf",
   "humming-kernels[cu13]==0.1.12",
   "interegular",
@@ -106,6 +107,14 @@ dependencies = [
 name = "pypi"
 url = "https://pypi.org/simple"
 default = true
+
+[[tool.uv.index]]
+name = "flashinfer-cu130"
+url = "https://flashinfer.ai/whl/cu130"
+explicit = true
+
+[tool.uv.sources]
+flashinfer-jit-cache = { index = "flashinfer-cu130" }
 
 [project.optional-dependencies]
 checkpoint-engine = ["checkpoint-engine==0.1.2"]
