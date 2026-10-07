@@ -315,6 +315,18 @@ class FINISH_LENGTH(BaseFinishReason):
         }
 
 
+class FINISH_REPEAT(BaseFinishReason):
+    def __init__(self, repeat_length: int):
+        super().__init__()
+        self.repeat_length = repeat_length
+
+    def to_json(self):
+        return {
+            "type": "repeat",
+            "repeat_length": self.repeat_length,
+        }
+
+
 class FINISH_ABORT(BaseFinishReason):
     def __init__(self, message=None, status_code=None, err_type=None):
         super().__init__()
@@ -1406,6 +1418,8 @@ class Req(ReqDllmMixin):
         # For hisparse
         self.hisparse_staging = False
 
+        self.init_rolling_hash_state()
+
         # Snapshot of the scheduler prefill-token counter taken at waiting_queue entry; used by HRRN aging.
         self.arrival_processed_tokens: int = 0
 
@@ -1916,6 +1930,42 @@ class Req(ReqDllmMixin):
             self.finished_reason = FINISH_LENGTH(length=max_new_tokens)
             self.finished_len = max_new_tokens
 
+    def init_rolling_hash_state(self):
+        from sglang.srt.managers.utils import RollingHashState
+
+        # TODO: hard coded rolling hashstate params
+        self.rolling_hash_state = RollingHashState(
+            min_count=10,
+            min_repeat_length=36,
+            max_repeat_length=4096,
+        )
+        # if self.sampling_params.repeat_min_count > 1:
+        #     from sglang.srt.managers.utils import RollingHashState
+
+        #     self.rolling_hash_state = RollingHashState(
+        #         min_count=self.sampling_params.repeat_min_count,
+        #         min_repeat_length=self.sampling_params.repeat_min_length,
+        #         max_repeat_length=self.sampling_params.repeat_max_length,
+        #     )
+        #     logger.warning(
+        #         f"rolling hash state enable, min count is {self.sampling_params.repeat_min_count}, min_repeat_length is {self.sampling_params.repeat_min_length}, max_repeat_length is {self.sampling_params.repeat_max_length}"
+        #     )
+        # else:
+        #     self.rolling_hash_state = None
+        #     logger.warning(
+        #         f"NO ROLLING HASH STATE！！！min count is {self.sampling_params.repeat_min_count}, min_repeat_length is {self.sampling_params.repeat_min_length}, max_repeat_length is {self.sampling_params.repeat_max_length}"
+        #     )
+
+    def _check_repetition_penalty_finish(self):
+        if self.rolling_hash_state is None:
+            return False
+        assert len(self.output_ids) > self.rolling_hash_state.current_length
+        if (repeat_length := self.rolling_hash_state.has_repeat(self.output_ids)) > 0:
+            logger.warning(f"There is a repeat req with repeat length {repeat_length}")
+            self.finished_reason = FINISH_REPEAT(repeat_length=repeat_length)
+            return True
+        return False
+
     def update_finish_state(self, new_accepted_len: int = 1):
         if self.finished():
             return
@@ -1956,6 +2006,9 @@ class Req(ReqDllmMixin):
 
         if self.grammar is not None and self.grammar.is_terminated():
             self.finished_reason = FINISH_MATCHED_TOKEN(matched=self.output_ids[-1])
+            return
+
+        if self._check_repetition_penalty_finish():
             return
 
     def reset_for_retract(self):
@@ -2007,6 +2060,10 @@ class Req(ReqDllmMixin):
             self.weight_version_events = truncate_weight_version_events(
                 self.weight_version_events, num_kept_tokens=self.send_token_offset
             )
+            # Discarding output_ids invalidates the repetition-detection state,
+            # whose cached prefix hashes / current_length still describe the old
+            # (now-gone) output. Rebuild it so re-generation starts clean.
+            self.init_rolling_hash_state()
 
     def _mamba_pool_needing_backup(self, req_to_token_pool, allocator):
         if allocator.get_kvcache().cpu_copy_carries_mamba:

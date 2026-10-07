@@ -3,8 +3,9 @@ from __future__ import annotations
 import dataclasses
 import logging
 import re
+from array import array
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, List, Optional, Union
+from typing import TYPE_CHECKING, Any, List, Optional, Sequence, Union
 
 import msgspec
 import torch
@@ -477,3 +478,114 @@ def compute_num_reserved_tokens() -> int:
         spec.speculative_eagle_topk * spec.speculative_num_steps,
         max_speculative_num_draft_tokens(),
     )
+
+
+BASES = (131, 137)
+MODS = ((1 << 61) - 1, (1 << 31) - 1)
+POWER_TABLES = [array("q", [1]) for _ in MODS]  # post-mod powers, fit "q"
+
+
+class RollingHashState:
+    def __init__(
+        self,
+        min_count: int,
+        min_repeat_length: int = 1,
+        max_repeat_length: int | None = None,
+    ) -> None:
+        # Signed 64-bit array: all stored values are post-mod, in [0, 2**61 - 1),
+        # so they fit "q" and use ~8 bytes each (vs ~28 + a pointer for boxed
+        # ints in a list), giving lower memory and better cache locality.
+        self.prefix_hashes = [array("q", [0]) for _ in MODS]  # length n + 1
+        # token value -> ascending absolute positions where it occurs, restricted
+        # to the retained window. Used to prune period candidates: a period
+        # `length` requires token_ids[n-1] == token_ids[n-1-length], so only
+        # positions holding the last token's value can yield a valid length.
+        self.positions: dict[int, list[int]] = {}
+        self.current_length = 0
+        self.min_count = min_count
+        self.min_repeat_length = min_repeat_length
+        self.max_repeat_length = max_repeat_length
+        self.start = 0
+        self.window_size = (self.max_repeat_length or float("inf")) * self.min_count
+
+    def extend(self, token_ids: Sequence[int], new_length: int) -> None:
+        for hash_values, base, mod in zip(self.prefix_hashes, BASES, MODS):
+            for i in range(self.current_length, new_length):
+                hash_values.append((hash_values[-1] * base + token_ids[i] + 1) % mod)
+        for i in range(self.current_length, new_length):
+            self.positions.setdefault(token_ids[i], []).append(i)
+        self.current_length = new_length
+
+        stored_length = self.current_length - self.start
+
+        if stored_length > self.window_size * 2 + 1:
+            for hash_values in self.prefix_hashes:
+                del hash_values[: self.window_size]
+            self.start += self.window_size
+            self._evict_positions()
+
+    def _evict_positions(self) -> None:
+        """Drop recorded positions that fell out of the retained window."""
+        self.positions = {
+            value: kept
+            for value, positions in self.positions.items()
+            if (kept := [p for p in positions if p >= self.start])
+        }
+
+    @staticmethod
+    def grow_powers(new_length: int) -> None:
+        for power_table, base, mod in zip(POWER_TABLES, BASES, MODS):
+            while len(power_table) <= new_length:
+                power_table.append(power_table[-1] * base % mod)
+
+    def _equal_substrings(
+        self, token_ids: Sequence[int], a: int, b: int, length: int
+    ) -> bool:
+        """Whether token_ids[a:a+length] == token_ids[b:b+length], via rolling hash."""
+        if length == 0:
+            return True
+        probe = min(3, length)
+        if any(token_ids[a + i] != token_ids[b + i] for i in range(probe)):
+            return False
+        a -= self.start
+        b -= self.start
+        for prefix_hashes, power_table, mod in zip(
+            self.prefix_hashes, POWER_TABLES, MODS
+        ):
+            power = power_table[length]
+            ha = (prefix_hashes[a + length] - prefix_hashes[a] * power) % mod
+            hb = (prefix_hashes[b + length] - prefix_hashes[b] * power) % mod
+            if ha != hb:
+                return False
+        return True
+
+    def has_repeat(
+        self,
+        token_ids: Sequence[int],
+    ) -> int:
+        self.extend(token_ids, len(token_ids))
+        n = len(token_ids)
+        self.grow_powers(min(n, self.window_size * 2 + 1))
+
+        upper = n // self.min_count
+        if self.max_repeat_length is not None:
+            upper = min(upper, self.max_repeat_length)
+
+        # A period `length` requires token_ids[n-1] == token_ids[n-1-length], so
+        # only positions holding the last token's value can yield a valid length.
+        # Those positions are ascending, so walking them newest-first visits
+        # candidates in ascending `length` -> the first match is the smallest
+        # period. The suffix has period `length` iff it equals itself shifted by
+        # `length`, a single overlapping comparison covering all min_count blocks.
+        reps = self.min_count - 1
+        for p in reversed(self.positions.get(token_ids[n - 1], ())):
+            length = (n - 1) - p
+            if length < self.min_repeat_length:
+                continue
+            if length > upper:
+                break
+            if self._equal_substrings(
+                token_ids, n - reps * length, n - self.min_count * length, reps * length
+            ):
+                return length
+        return 0

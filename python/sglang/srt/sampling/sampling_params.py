@@ -161,6 +161,10 @@ class SamplingParams(msgspec.Struct, kw_only=True, array_like=True):
     is_normalized: bool = False  # set by normalize()
     ebnf_full_assistant: bool = False
 
+    repeat_min_count: int = 0
+    repeat_min_length: int = 1
+    repeat_max_length: Optional[int] = None
+
     def __post_init__(self):
         # For non-optional params, treat None as "use default" so that callers
         # (e.g. /generate) can pass null without crashing verify().
@@ -205,6 +209,12 @@ class SamplingParams(msgspec.Struct, kw_only=True, array_like=True):
         )
         self.no_stop_trim = (
             self.no_stop_trim if self.no_stop_trim is not None else False
+        )
+        self.repeat_min_count = (
+            self.repeat_min_count if self.repeat_min_count is not None else 0
+        )
+        self.repeat_min_length = (
+            self.repeat_min_length if self.repeat_min_length is not None else 1
         )
 
         # An empty grammar constraint means "unset", not "constrain to nothing".
@@ -288,6 +298,18 @@ class SamplingParams(msgspec.Struct, kw_only=True, array_like=True):
             vocab_size=vocab_size,
             strict=True,
         )
+
+        if self.repeat_min_length < 1:
+            raise ValueError(
+                f"repeat_min_length must be at least 1, got {self.repeat_min_length}."
+            )
+        if self.repeat_max_length is not None and (
+            self.repeat_max_length < self.repeat_min_length
+        ):
+            raise ValueError(
+                "repeat_max_length must be None or >= repeat_min_length "
+                f"({self.repeat_min_length}), got {self.repeat_max_length}."
+            )
 
         grammars = [
             self.json_schema,
