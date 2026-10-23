@@ -118,11 +118,24 @@ impl RouterConfigBuilder {
     ) -> Self {
         self.config.policy = PolicyConfig::CacheAware {
             cache_threshold,
+            cache_min_match_chars: 0,
             balance_abs_threshold,
             balance_rel_threshold,
             eviction_interval_secs,
             max_tree_size,
         };
+        self
+    }
+
+    /// Set the strict matched-character lower bound after selecting the main cache-aware policy.
+    pub fn cache_min_match_chars(mut self, value: usize) -> Self {
+        if let PolicyConfig::CacheAware {
+            cache_min_match_chars,
+            ..
+        } = &mut self.config.policy
+        {
+            *cache_min_match_chars = value;
+        }
         self
     }
 
@@ -861,14 +874,18 @@ mod tests {
         let config = RouterConfigBuilder::new()
             .regular_mode(vec!["http://worker1:8000".to_string()])
             .cache_aware_policy(0.8, 10, 1.5, 300, 1000)
+            .cache_min_match_chars(4096)
             .build()
             .unwrap();
 
         match config.policy {
             PolicyConfig::CacheAware {
-                cache_threshold, ..
+                cache_threshold,
+                cache_min_match_chars,
+                ..
             } => {
                 assert!((cache_threshold - 0.8).abs() < 0.0001);
+                assert_eq!(cache_min_match_chars, 4096);
             }
             _ => panic!("Expected CacheAware policy"),
         }

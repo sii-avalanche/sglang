@@ -24,10 +24,10 @@
 
     Process:
     a. For each request, find the worker with the highest prefix match
-    b. If match rate > cache_threshold:
+    b. If match rate > cache_threshold AND matched characters > cache_min_match_chars:
     Route to the worker with highest match (likely has relevant data cached)
-    c. If match rate ≤ cache_threshold:
-    Route to the worker with smallest tree size (most available cache capacity)
+    c. If either threshold is not exceeded:
+    Route to the worker with minimum load (random tie-breaking)
     d. Background maintenance:
     Periodically evict least recently used leaf nodes to prevent memory overflow
 
@@ -41,7 +41,9 @@
     ------------------------
     1. cache_threshold: (float, 0.0 to 1.0)
     Minimum prefix match ratio to use highest-match routing.
-    Below this threshold, routes to worker with most available cache space.
+    At or below this threshold, routes to a minimum-load worker.
+    cache_min_match_chars: strict lower bound on matched Unicode scalar values.
+    Both thresholds must be exceeded; the default character bound is zero.
 
     2. balance_abs_threshold: (integer)
     Absolute difference threshold for load imbalance detection.
@@ -440,8 +442,11 @@ impl LoadBalancingPolicy for CacheAwarePolicy {
                 result.matched_char_count as f32 / result.input_char_count as f32
             };
 
+            let cache_affinity = match_rate > self.config.cache_threshold
+                && result.matched_char_count > self.config.cache_min_match_chars;
+
             // Select worker without String allocation
-            let selected_idx = if match_rate > self.config.cache_threshold {
+            let selected_idx = if cache_affinity {
                 // Cache hit path: find worker by URL (compare &str directly, no allocation)
                 let tenant_url: &str = &result.tenant;
                 workers
@@ -490,7 +495,7 @@ impl LoadBalancingPolicy for CacheAwarePolicy {
             }
 
             // Selected worker no longer exists or unhealthy, remove stale tenant from tree
-            if match_rate > self.config.cache_threshold {
+            if cache_affinity {
                 let tenant_url: &str = &result.tenant;
                 tree.remove_tenant(tenant_url);
                 debug!("Removed stale worker {} from cache tree", tenant_url);
@@ -627,9 +632,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_cache_affinity_character_and_ratio_thresholds() {
+        // Each case gets a fresh tree so fallback inserts cannot affect later cases.
+        for (cached, request, ratio, min_chars, expected) in [
+            ("abcd", "abcd", 0.5, 5, 1),       // short, despite a perfect ratio
+            ("abcd", "abcd", 0.5, 4, 1),       // equality fails the character bound
+            ("abcd", "abcd", 0.5, 3, 0),       // both bounds exceeded
+            ("abcd", "abcdefgh", 0.5, 3, 1),   // equality fails the ratio bound
+            ("abcd", "abcdefghij", 0.5, 3, 1), // length alone is insufficient
+            ("你好🦀", "你好🦀", 0.5, 3, 1),   // characters, not UTF-8 bytes
+            ("你好🦀", "你好🦀", 0.5, 2, 0),
+            ("abcd", "abcd", 0.5, 0, 0), // default preserves affinity
+            ("abcd", "", 0.0, 0, 1),     // empty input falls back
+            ("abcd", "xyz", 0.0, 0, 1),  // no common prefix
+        ] {
+            let policy = CacheAwarePolicy::with_config(CacheAwareConfig {
+                cache_threshold: ratio,
+                cache_min_match_chars: min_chars,
+                balance_abs_threshold: usize::MAX,
+                eviction_interval_secs: 0,
+                ..Default::default()
+            });
+            let workers: Vec<Arc<dyn Worker>> = vec![
+                Arc::new(BasicWorkerBuilder::new("http://w1:8000").build()),
+                Arc::new(BasicWorkerBuilder::new("http://w2:8000").build()),
+            ];
+            policy.init_workers(&workers);
+            workers[0].increment_load();
+            let key = tree_key_for_worker(workers[0].as_ref());
+            policy
+                .trees
+                .get(&key)
+                .unwrap()
+                .insert(cached, workers[0].url());
+            let selected = policy
+                .select_worker(
+                    &workers,
+                    &SelectWorkerInfo {
+                        request_text: Some(request),
+                        ..Default::default()
+                    },
+                )
+                .await;
+            assert_eq!(
+                selected,
+                Some(expected),
+                "request={request:?}, min={min_chars}, ratio={ratio}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn test_cache_aware_with_imbalanced_load() {
         let policy = CacheAwarePolicy::with_config(CacheAwareConfig {
             cache_threshold: 0.5,
+            cache_min_match_chars: 0,
             balance_abs_threshold: 5,
             balance_rel_threshold: 2.0,
             eviction_interval_secs: 0, // Disable eviction thread
@@ -669,6 +726,7 @@ mod tests {
     async fn test_cache_aware_imbalanced_random_tie_break() {
         let policy = CacheAwarePolicy::with_config(CacheAwareConfig {
             cache_threshold: 0.5,
+            cache_min_match_chars: 0,
             balance_abs_threshold: 5,
             balance_rel_threshold: 2.0,
             eviction_interval_secs: 0,
@@ -1070,6 +1128,7 @@ mod tests {
         let config = CacheAwareConfig {
             eviction_interval_secs: 0,
             cache_threshold: 0.0,
+            cache_min_match_chars: 0,
             ..Default::default()
         };
         let prefill_policy = CacheAwarePolicy::with_config(config.clone());
@@ -1135,6 +1194,7 @@ mod tests {
         let config = CacheAwareConfig {
             eviction_interval_secs: 0,
             cache_threshold: 0.0,
+            cache_min_match_chars: 0,
             ..Default::default()
         };
         let policy = CacheAwarePolicy::with_config(config);

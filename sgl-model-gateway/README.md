@@ -1108,3 +1108,27 @@ The script automatically extracts author attribution, PR links, and identifies n
 ---
 
 SGLang Model Gateway continues to evolve alongside the core SGLang runtime. Contributions should keep CLI flags, documentation, and Python bindings in sync with the Rust implementation.
+
+### Minimum prefix length for cache-aware routing
+
+Use `--cache-min-match-chars` with `--cache-threshold` to avoid cache affinity
+for short prefixes even when their match ratio is high. For example:
+
+```bash
+python -m sglang_router.launch_router --policy cache_aware \
+  --worker-urls http://localhost:8000 http://localhost:8001 \
+  --cache-threshold 0.9 --cache-min-match-chars 4096
+```
+
+Both the Python launcher and Rust binary support this option. Given `m` matched
+characters and `n` input characters, cache affinity requires **both**
+`m / n > cache_threshold` and `m > cache_min_match_chars` (strict comparisons).
+Characters are Unicode scalar values, the same units used by the radix tree's
+match ratio, rather than bytes or tokens. The default is `0`, preserving existing
+routing behavior. The value must be non-negative; older JSON configurations may
+omit it. In PD mode it applies to each pool using the cache-aware policy.
+
+When either bound fails, routing uses the least-loaded healthy worker with random
+tie-breaking. Existing load imbalance thresholds still take priority over cache
+affinity. Matching continues to use the existing best-prefix candidate; this flag
+does not change candidate selection or the approximate nature of the cache tree.

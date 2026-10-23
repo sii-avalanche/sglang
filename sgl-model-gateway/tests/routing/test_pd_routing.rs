@@ -166,6 +166,7 @@ mod pd_routing_unit_tests {
                 },
                 PolicyConfig::CacheAware {
                     cache_threshold: 0.7,
+                    cache_min_match_chars: 0,
                     balance_abs_threshold: 20,
                     balance_rel_threshold: 1.2,
                     eviction_interval_secs: 60,

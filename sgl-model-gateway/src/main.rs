@@ -154,6 +154,10 @@ struct CliArgs {
     #[arg(long, default_value_t = 0.3, help_heading = "Routing Policy")]
     cache_threshold: f32,
 
+    /// Matched Unicode characters must exceed this value for cache affinity
+    #[arg(long, default_value_t = 0, help_heading = "Routing Policy")]
+    cache_min_match_chars: usize,
+
     /// Absolute threshold for load balancing trigger
     #[arg(long, default_value_t = 64, help_heading = "Routing Policy")]
     balance_abs_threshold: usize,
@@ -766,6 +770,7 @@ impl CliArgs {
             "round_robin" => PolicyConfig::RoundRobin,
             "cache_aware" => PolicyConfig::CacheAware {
                 cache_threshold: self.cache_threshold,
+                cache_min_match_chars: self.cache_min_match_chars,
                 balance_abs_threshold: self.balance_abs_threshold,
                 balance_rel_threshold: self.balance_rel_threshold,
                 eviction_interval_secs: self.eviction_interval,

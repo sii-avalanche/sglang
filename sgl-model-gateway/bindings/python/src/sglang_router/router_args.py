@@ -57,6 +57,7 @@ class RouterArgs:
     worker_startup_timeout_secs: int = 1800
     worker_startup_check_interval: int = 30
     cache_threshold: float = 0.3
+    cache_min_match_chars: int = 0
     balance_abs_threshold: int = 64
     balance_rel_threshold: float = 1.5
     eviction_interval_secs: int = 60
@@ -307,6 +308,12 @@ class RouterArgs:
             type=float,
             default=RouterArgs.cache_threshold,
             help="Cache threshold (0.0-1.0) for cache-aware routing",
+        )
+        routing_group.add_argument(
+            f"--{prefix}cache-min-match-chars",
+            type=int,
+            default=RouterArgs.cache_min_match_chars,
+            help="Matched Unicode characters must exceed this non-negative value, together with cache-threshold, for cache affinity (default: 0)",
         )
         routing_group.add_argument(
             f"--{prefix}balance-abs-threshold",
@@ -1027,6 +1034,9 @@ class RouterArgs:
         return cls(**args_dict)
 
     def _validate_router_args(self):
+        if self.cache_min_match_chars < 0:
+            raise ValueError("cache_min_match_chars must be non-negative")
+
         # Validate configuration based on mode
         if self.pd_disaggregation:
             # Warn about policy usage in PD mode

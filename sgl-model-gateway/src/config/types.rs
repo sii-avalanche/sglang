@@ -263,6 +263,9 @@ pub enum PolicyConfig {
     #[serde(rename = "cache_aware")]
     CacheAware {
         cache_threshold: f32,
+        /// Matched Unicode character count must be strictly greater than this value.
+        #[serde(default)]
+        cache_min_match_chars: usize,
         balance_abs_threshold: usize,
         balance_rel_threshold: f32,
         eviction_interval_secs: u64,
@@ -811,6 +814,7 @@ mod tests {
 
         let cache_aware = PolicyConfig::CacheAware {
             cache_threshold: 0.8,
+            cache_min_match_chars: 0,
             balance_abs_threshold: 10,
             balance_rel_threshold: 1.5,
             eviction_interval_secs: 300,
@@ -832,6 +836,7 @@ mod tests {
 
         let cache_aware = PolicyConfig::CacheAware {
             cache_threshold: 0.8,
+            cache_min_match_chars: 0,
             balance_abs_threshold: 10,
             balance_rel_threshold: 1.5,
             eviction_interval_secs: 300,
@@ -851,9 +856,36 @@ mod tests {
     }
 
     #[test]
+    fn test_cache_min_match_chars_serialization() {
+        let legacy = r#"{"type":"cache_aware","cache_threshold":0.5,"balance_abs_threshold":32,"balance_rel_threshold":1.5,"eviction_interval_secs":120,"max_tree_size":10000}"#;
+        let config: PolicyConfig = serde_json::from_str(legacy).unwrap();
+        assert!(matches!(
+            config,
+            PolicyConfig::CacheAware {
+                cache_min_match_chars: 0,
+                ..
+            }
+        ));
+        let mut json = serde_json::to_value(config).unwrap();
+        json["cache_min_match_chars"] = serde_json::json!(4096);
+        let config: PolicyConfig = serde_json::from_value(json.clone()).unwrap();
+        assert!(matches!(
+            config,
+            PolicyConfig::CacheAware {
+                cache_min_match_chars: 4096,
+                ..
+            }
+        ));
+        assert_eq!(serde_json::to_value(config).unwrap(), json);
+        json["cache_min_match_chars"] = serde_json::json!(-1);
+        assert!(serde_json::from_value::<PolicyConfig>(json).is_err());
+    }
+
+    #[test]
     fn test_cache_aware_parameters() {
         let cache_aware = PolicyConfig::CacheAware {
             cache_threshold: 0.75,
+            cache_min_match_chars: 0,
             balance_abs_threshold: 20,
             balance_rel_threshold: 2.0,
             eviction_interval_secs: 600,
@@ -863,12 +895,14 @@ mod tests {
         match cache_aware {
             PolicyConfig::CacheAware {
                 cache_threshold,
+                cache_min_match_chars,
                 balance_abs_threshold,
                 balance_rel_threshold,
                 eviction_interval_secs,
                 max_tree_size,
             } => {
                 assert!((cache_threshold - 0.75).abs() < 0.0001);
+                assert_eq!(cache_min_match_chars, 0);
                 assert_eq!(balance_abs_threshold, 20);
                 assert!((balance_rel_threshold - 2.0).abs() < 0.0001);
                 assert_eq!(eviction_interval_secs, 600);
@@ -1256,6 +1290,7 @@ mod tests {
             decode_urls: vec!["http://decode1".to_string()],
             prefill_policy: Some(PolicyConfig::CacheAware {
                 cache_threshold: 0.5,
+                cache_min_match_chars: 0,
                 balance_abs_threshold: 32,
                 balance_rel_threshold: 1.1,
                 eviction_interval_secs: 60,
@@ -1286,6 +1321,7 @@ mod tests {
             decode_urls: vec!["http://decode1".to_string()],
             prefill_policy: Some(PolicyConfig::CacheAware {
                 cache_threshold: 0.5,
+                cache_min_match_chars: 0,
                 balance_abs_threshold: 32,
                 balance_rel_threshold: 1.1,
                 eviction_interval_secs: 60,
@@ -1342,6 +1378,7 @@ mod tests {
 
         let main_policy = PolicyConfig::CacheAware {
             cache_threshold: 0.7,
+            cache_min_match_chars: 0,
             balance_abs_threshold: 20,
             balance_rel_threshold: 1.5,
             eviction_interval_secs: 300,
