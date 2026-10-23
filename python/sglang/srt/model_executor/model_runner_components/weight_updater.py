@@ -16,7 +16,7 @@ from sglang.srt.model_loader.loader import (
 from sglang.srt.model_loader.utils import set_default_torch_dtype
 from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.platforms import current_platform
-from sglang.srt.runtime_context import get_model
+from sglang.srt.runtime_context import get_model, get_parallel
 from sglang.srt.utils import (
     MultiprocessingSerializer,
     dynamic_import,
@@ -115,6 +115,11 @@ class WeightUpdater:
         assert group_name != "", "Group name cannot be empty"
 
         rank = rank_offset + self.tp_rank
+        parallel = get_parallel()
+        if parallel.dp_size > 1 and not parallel.enable_dp_attention:
+            assert parallel.pp_size == 1, "ordinary DP weight updates require pp_size=1"
+            # Ordinary DP replicas have independent TP groups but share this update group.
+            rank += self.get_model_runner().dp_rank * parallel.tp_size
 
         logger.info(
             f"init custom process group: master_address={master_address}, master_port={master_port}, "

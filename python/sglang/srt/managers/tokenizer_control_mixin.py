@@ -448,9 +448,11 @@ class TokenizerControlMixin:
         request: Optional[fastapi.Request] = None,
     ) -> Tuple[bool, str]:
         self.auto_create_handle_loop()
-        assert get_parallel().dp_size == 1 or get_parallel().enable_dp_attention, (
-            "dp_size must be 1 or dp attention must be enabled for update weights from distributed"
-        )
+        assert (
+            get_parallel().dp_size == 1
+            or get_parallel().enable_dp_attention
+            or get_parallel().pp_size == 1
+        ), "ordinary DP weight updates require pp_size=1"
 
         results = await self.init_weights_update_group_communicator(obj)
         return FanOutCommunicator.merge_results(results)
@@ -461,9 +463,11 @@ class TokenizerControlMixin:
         request: Optional[fastapi.Request] = None,
     ) -> Tuple[bool, str]:
         self.auto_create_handle_loop()
-        assert get_parallel().dp_size == 1 or get_parallel().enable_dp_attention, (
-            "dp_size must be 1 or dp attention must be enabled for destroy parameter update group"
-        )
+        assert (
+            get_parallel().dp_size == 1
+            or get_parallel().enable_dp_attention
+            or get_parallel().pp_size == 1
+        ), "ordinary DP weight updates require pp_size=1"
 
         results = await self.destroy_weights_update_group_communicator(obj)
         return FanOutCommunicator.merge_results(results)
@@ -591,9 +595,11 @@ class TokenizerControlMixin:
         request: Optional[fastapi.Request] = None,
     ) -> Tuple[bool, str]:
         self.auto_create_handle_loop()
-        assert get_parallel().dp_size == 1 or get_parallel().enable_dp_attention, (
-            "dp_size must be 1 or dp attention must be enabled for update weights from distributed"
-        )
+        assert (
+            get_parallel().dp_size == 1
+            or get_parallel().enable_dp_attention
+            or get_parallel().pp_size == 1
+        ), "ordinary DP weight updates require pp_size=1"
 
         if error := self._staged_serving_state_error(obj):
             return False, error

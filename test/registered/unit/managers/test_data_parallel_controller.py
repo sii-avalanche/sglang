@@ -14,7 +14,7 @@ is exercised as the real method, no mock. The refresh-throttle tests inject
 import time
 import unittest
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import msgspec.structs
 
@@ -117,6 +117,21 @@ class TestDPBudgetUpdateBudget(CustomTestCase):
         )
         self.assertEqual(budget.total_requests, [10, 2, 30])
         self.assertEqual(budget.total_tokens, [100, 50, 300])
+
+
+class TestOrdinaryDPControlBroadcast(CustomTestCase):
+    def test_pause_and_weight_controls_reach_each_independent_replica(self):
+        """Sending control only to TP rank zero must not leave ordinary DP replicas running stale weights."""
+        controller = _make_controller(dp_size=4)
+        controller.control_message_step = 1
+        delivered = []
+        message = object()
+        with patch(
+            "sglang.srt.managers.data_parallel_controller.sock_send",
+            side_effect=lambda worker, obj: delivered.append((worker, obj)),
+        ):
+            controller.send_control_message(message)
+        self.assertEqual(delivered, [(worker, message) for worker in controller.workers])
 
 
 class TestDPBudgetDispatch(CustomTestCase):
