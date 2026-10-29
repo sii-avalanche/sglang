@@ -411,6 +411,22 @@ def _build_flat_input_top_logprobs_fields_from_arrays(
     return fields
 
 
+def _encode_output_top_logprobs(values, indices, width):
+    """Versioned little-endian arrays; no token-text expansion or JSON number lists."""
+    if len(values) != len(indices):
+        raise ValueError("Candidate row counts differ")
+    ids = np.full((len(values), width), -1, dtype="<i4")
+    logps = np.full((len(values), width), -np.inf, dtype="<f4")
+    for row, (scores, tokens) in enumerate(zip(values, indices)):
+        if len(scores) != len(tokens) or len(tokens) > width:
+            raise ValueError("Invalid candidate width")
+        ids[row, :len(tokens)] = tokens
+        logps[row, :len(scores)] = scores
+    return {"version": 1, "shape": [len(values), width],
+            "ids_i32_le": pybase64.b64encode(ids.tobytes()).decode("ascii"),
+            "logps_f32_le": pybase64.b64encode(logps.tobytes()).decode("ascii")}
+
+
 class InputFormat(Enum):
     """Input format types for tokenization handling."""
 
@@ -2872,15 +2888,20 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
                         )
                     )
                 meta_info["input_top_logprobs"] = state.input_top_logprobs
-            if len(state.output_top_logprobs_val) > len(state.output_top_logprobs):
-                state.output_top_logprobs.extend(
-                    self.detokenize_top_logprobs_tokens(
-                        state.output_top_logprobs_val[len(state.output_top_logprobs) :],
-                        state.output_top_logprobs_idx[len(state.output_top_logprobs) :],
-                        return_text_in_logprobs,
-                    )
+            if getattr(state.obj, "return_compact_top_logprobs", False):
+                meta_info["output_top_logprobs_compact"] = _encode_output_top_logprobs(
+                    state.output_top_logprobs_val, state.output_top_logprobs_idx, top_logprobs_num
                 )
-            meta_info["output_top_logprobs"] = state.output_top_logprobs
+            else:
+                if len(state.output_top_logprobs_val) > len(state.output_top_logprobs):
+                    state.output_top_logprobs.extend(
+                        self.detokenize_top_logprobs_tokens(
+                            state.output_top_logprobs_val[len(state.output_top_logprobs) :],
+                            state.output_top_logprobs_idx[len(state.output_top_logprobs) :],
+                            return_text_in_logprobs,
+                        )
+                    )
+                meta_info["output_top_logprobs"] = state.output_top_logprobs
 
         # 3. Handle token_ids_logprob
         if token_ids_logprob is not None:
