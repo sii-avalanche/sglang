@@ -1785,6 +1785,21 @@ class BaseMultimodalProcessor(ABC):
         num_placeholders = sum(
             1 for token_id in original_ids if token_id == placeholder_token_id
         )
+        # Training clients can already have expanded each image to its patch tokens.
+        # Preserve these IDs verbatim only when each image run has the expected size.
+        if num_placeholders == sum(counts):
+            runs = []
+            in_run = False
+            for token_id in original_ids:
+                if token_id == placeholder_token_id:
+                    if not runs or not in_run:
+                        runs.append(0)
+                    runs[-1] += 1
+                    in_run = True
+                else:
+                    in_run = False
+            if runs == counts:
+                return list(original_ids)
         if num_placeholders != len(counts):
             raise ValueError(
                 f"prompt has {num_placeholders} image placeholder token(s) but "
@@ -1896,9 +1911,9 @@ class BaseMultimodalProcessor(ABC):
                         dtype=input_ids.dtype,
                     )
                 except Exception as e:
-                    logger.warning(
-                        f"Due to {e}, falling back to decode+retokenize, which may change prompt length (token drift)."
-                    )
+                    raise ValueError(
+                        "Cannot preserve multimodal input_ids; check image preprocessing and placeholder counts"
+                    ) from e
         else:
             ret = None
 
