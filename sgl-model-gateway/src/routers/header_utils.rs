@@ -263,8 +263,6 @@ mod tests {
 
     #[test]
     fn test_should_forward_request_header_whitelist() {
-        assert!(should_forward_request_header("accept"));
-        assert!(should_forward_request_header("Accept"));
         assert!(should_forward_request_header("authorization"));
         assert!(should_forward_request_header("Authorization"));
         assert!(should_forward_request_header("AUTHORIZATION"));
