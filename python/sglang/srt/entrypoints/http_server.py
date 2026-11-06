@@ -1392,6 +1392,8 @@ async def init_weights_update_group(
         obj, request
     )
     content = {"success": success, "message": message}
+    if success and obj.recoverable_timeout is not None:
+        content["recoverable_timeout"] = obj.recoverable_timeout
     if success:
         return ORJSONResponse(content, status_code=200)
     else:

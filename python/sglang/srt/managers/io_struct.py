@@ -2069,6 +2069,8 @@ class InitWeightsUpdateGroupReqInput(BaseReq, kw_only=True):
     group_name: str = "weight_update_group"
     # The backend
     backend: str = "nccl"
+    # Opt-in bounded waits; only this weight-transfer group is recoverable.
+    recoverable_timeout: Optional[float] = None
 
 
 class InitWeightsUpdateGroupReqOutput(BaseReq, kw_only=True):

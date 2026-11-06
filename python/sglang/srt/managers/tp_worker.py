@@ -150,6 +150,7 @@ class BaseTpWorker(ABC):
             recv_req.world_size,
             recv_req.group_name,
             recv_req.backend,
+            recoverable_timeout=recv_req.recoverable_timeout,
         )
         return success, message
 

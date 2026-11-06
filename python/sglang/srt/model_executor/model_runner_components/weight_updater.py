@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import gc
 import logging
+import time
+from contextlib import nullcontext
+from datetime import timedelta
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable, List, Optional, Tuple, Union
 
@@ -22,6 +25,7 @@ from sglang.srt.utils import (
     dynamic_import,
     get_available_gpu_memory,
     init_custom_process_group,
+    temp_set_env,
 )
 from sglang.srt.utils.network import NetworkAddress
 from sglang.srt.utils.patch_torch import monkey_patch_torch_reductions
@@ -89,6 +93,7 @@ class WeightUpdater:
     recapture_cuda_graph: Callable[[], None]
     get_model_runner: Callable[[], ModelRunner]
     _model_update_group: dict = field(default_factory=dict)
+    _model_update_timeout: dict = field(default_factory=dict)
 
     def init_weights_update_group(
         self,
@@ -98,6 +103,8 @@ class WeightUpdater:
         world_size,
         group_name,
         backend="nccl",
+        *,
+        recoverable_timeout: Optional[float] = None,
     ):
         """Initialize the Torch process group for model parameter updates.
 
@@ -109,9 +116,9 @@ class WeightUpdater:
         weights/parameters online, and broadcasts them to the inference
         engine through the `_model_update_group` process group.
         """
-        assert torch.distributed.is_initialized(), (
-            "Default torch process group must be initialized"
-        )
+        assert (
+            torch.distributed.is_initialized()
+        ), "Default torch process group must be initialized"
         assert group_name != "", "Group name cannot be empty"
 
         rank = rank_offset + self.tp_rank
@@ -123,13 +130,35 @@ class WeightUpdater:
 
         try:
             na = NetworkAddress(master_address, master_port)
-            self._model_update_group[group_name] = init_custom_process_group(
-                backend=backend,
-                init_method=na.to_tcp(),
-                world_size=world_size,
-                rank=rank,
-                group_name=group_name,
+            if recoverable_timeout is not None and (
+                backend != "nccl" or not 0 < recoverable_timeout <= 300
+            ):
+                raise ValueError(
+                    "recoverable_timeout requires NCCL and a timeout in (0, 300]"
+                )
+            # These settings are sampled at group construction. Restore the env
+            # immediately; existing TP/DP groups retain their original policy.
+            context = (
+                temp_set_env(
+                    TORCH_NCCL_BLOCKING_WAIT="1", TORCH_NCCL_ASYNC_ERROR_HANDLING="2"
+                )
+                if recoverable_timeout is not None
+                else nullcontext()
             )
+            with context:
+                self._model_update_group[group_name] = init_custom_process_group(
+                    backend=backend,
+                    init_method=na.to_tcp(),
+                    world_size=world_size,
+                    rank=rank,
+                    group_name=group_name,
+                    **(
+                        {"timeout": timedelta(seconds=4 * recoverable_timeout)}
+                        if recoverable_timeout is not None
+                        else {}
+                    ),
+                )
+            self._model_update_timeout[group_name] = recoverable_timeout
             return True, "Succeeded to initialize custom process group."
         except Exception as e:
             message = f"Failed to initialize custom process group: {e}."
@@ -140,6 +169,8 @@ class WeightUpdater:
         try:
             if group_name in self._model_update_group:
                 pg = self._model_update_group.pop(group_name)
+                if self._model_update_timeout.pop(group_name, None) is not None:
+                    pg._get_backend(torch.device(self.device, self.gpu_id)).abort()
                 torch.distributed.destroy_process_group(pg)
                 return True, "Succeeded to destroy custom process group."
             else:
@@ -245,7 +276,47 @@ class WeightUpdater:
         logger.info("Update weights end.")
         return True, "Succeeded to update model weights."
 
-    def receive_weights_from_distributed(
+    def _abort_weight_transfer(self, group_name):
+        group = self._model_update_group[group_name]
+        group._get_backend(torch.device(self.device, self.gpu_id)).abort()
+        completed = torch.cuda.Event()
+        completed.record()
+        deadline = time.monotonic() + 5.0
+        while not completed.query():
+            if time.monotonic() >= deadline:
+                raise RuntimeError("Aborted weight transfer did not release CUDA")
+            time.sleep(0.001)
+
+    def receive_weights_from_distributed(self, *, group_name, **kwargs):
+        if self._model_update_timeout.get(group_name) is None:
+            return self._receive_weights_from_distributed(group_name=group_name, **kwargs)
+        weights, error, status = None, None, 0
+        try:
+            weights = self._receive_weights_from_distributed(group_name=group_name, **kwargs)
+        except torch.distributed.DistBackendError as caught:
+            error, status = caught, 1
+            try:
+                self._abort_weight_transfer(group_name)
+            except Exception as abort_error:
+                error, status = abort_error, 2
+        except Exception as caught:
+            error, status = caught, 2
+        # A TP peer may fail while the leader's receive completes. Agree before
+        # any peer loads buffers or the leader acknowledges success over HTTP.
+        outcome = torch.tensor(status, dtype=torch.int32, device="cpu")
+        work = torch.distributed.all_reduce(
+            outcome, op=torch.distributed.ReduceOp.MAX,
+            group=self.get_model_runner().tp_group.cpu_group, async_op=True,
+        )
+        work.wait(timeout=timedelta(seconds=60))
+        if outcome.item() == 2:
+            raise RuntimeError("Weight receive failed; in-place recovery is unsafe") from error
+        if outcome.item() == 1:
+            self._abort_weight_transfer(group_name)
+            raise RuntimeError("WEIGHT_SYNC_NCCL_ABORTED: receiver group aborted") from error
+        return weights
+
+    def _receive_weights_from_distributed(
         self: WeightUpdater,
         *,
         names,
@@ -282,7 +353,14 @@ class WeightUpdater:
             )
             weights.append((name, weight))
         for handle in handles:
-            handle.wait()
+            timeout = self._model_update_timeout.get(group_name)
+            handle.wait(
+                **(
+                    {"timeout": timedelta(seconds=timeout)}
+                    if timeout is not None
+                    else {}
+                )
+            )
         return weights
 
     def _receive_bucketed_weights_from_distributed(
@@ -290,10 +368,15 @@ class WeightUpdater:
     ):
         bucket = FlattenedTensorBucket.empty(names, dtypes, shapes, self.device)
         flattened_tensor = bucket.get_flattened_tensor()
-        torch.distributed.broadcast(
+        work = torch.distributed.broadcast(
             flattened_tensor,
             src=0,
             group=self._model_update_group[group_name],
+            async_op=True,
+        )
+        timeout = self._model_update_timeout.get(group_name)
+        work.wait(
+            **({"timeout": timedelta(seconds=timeout)} if timeout is not None else {})
         )
         return bucket.reconstruct_tensors()
 
