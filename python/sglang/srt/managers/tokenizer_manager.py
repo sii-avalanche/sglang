@@ -422,9 +422,12 @@ def _encode_output_top_logprobs(values, indices, width):
             raise ValueError("Invalid candidate width")
         ids[row, :len(tokens)] = tokens
         logps[row, :len(scores)] = scores
-    return {"version": 1, "shape": [len(values), width],
-            "ids_i32_le": pybase64.b64encode(ids.tobytes()).decode("ascii"),
-            "logps_f32_le": pybase64.b64encode(logps.tobytes()).decode("ascii")}
+    return {
+        "version": 1,
+        "shape": [len(values), width],
+        "ids_i32_le": ids.tobytes(),
+        "logps_f32_le": logps.tobytes(),
+    }
 
 
 class InputFormat(Enum):
@@ -2576,10 +2579,10 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
             if getattr(recv_obj, "routed_experts", None):
                 val = recv_obj.routed_experts[i]
                 if val is not None:
-                    # BatchStrOutput is pre-encoded by the detokenizer;
-                    # BatchTokenIDOutput (skip_tokenizer_init) bypasses it.
                     if isinstance(val, torch.Tensor):
-                        val = pybase64.b64encode(val.numpy().tobytes()).decode("utf-8")
+                        val = val.numpy().tobytes()
+                    if isinstance(val, bytes) and not state.obj.binary_response:
+                        val = pybase64.b64encode(val).decode("ascii")
                     meta_info["routed_experts"] = val
             if getattr(recv_obj, "indexer_topk", None):
                 val = recv_obj.indexer_topk[i]
@@ -2888,9 +2891,11 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
                         )
                     )
                 meta_info["input_top_logprobs"] = state.input_top_logprobs
-            if getattr(state.obj, "return_compact_top_logprobs", False):
-                meta_info["output_top_logprobs_compact"] = _encode_output_top_logprobs(
-                    state.output_top_logprobs_val, state.output_top_logprobs_idx, top_logprobs_num
+            if state.obj.binary_response and not return_text_in_logprobs:
+                meta_info["output_top_logprobs"] = _encode_output_top_logprobs(
+                    state.output_top_logprobs_val,
+                    state.output_top_logprobs_idx,
+                    top_logprobs_num,
                 )
             else:
                 if len(state.output_top_logprobs_val) > len(state.output_top_logprobs):
