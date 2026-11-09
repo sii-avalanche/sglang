@@ -248,10 +248,9 @@ class GenerateReqInput:
     # the nested per-position [logprob, token_id, text] lists.
     return_flat_raw_top_logprobs: bool = False
     # Base64-encode the flat arrays. Requires return_flat_raw_top_logprobs.
-    return_compact_top_logprobs: bool = False
+    return_flat_raw_top_logprobs_b64: bool = False
     # Set by HTTP content negotiation; raw bytes require a binary response.
     binary_response: bool = False
-    return_flat_raw_top_logprobs_b64: bool = False
     # Whether to stream output.
     stream: bool = False
     # Whether to log metrics for this request (e.g. health_generate calls do not log metrics)
@@ -443,11 +442,6 @@ class GenerateReqInput:
         self._validate_rid_uniqueness()
 
     def _validate_inputs(self):
-        if self.return_compact_top_logprobs:
-            widths = self.top_logprobs_num if isinstance(self.top_logprobs_num, list) else [self.top_logprobs_num]
-            enabled = self.return_logprob if isinstance(self.return_logprob, list) else [self.return_logprob]
-            if self.stream or not all(enabled) or any(not isinstance(k, int) or k <= 0 for k in widths):
-                raise ValueError("Compact candidates require non-streaming return_logprob and positive top_logprobs_num")
         """Validate that the input configuration is valid."""
         if (
             self.text is None and self.input_ids is None and self.input_embeds is None
@@ -978,7 +972,6 @@ class GenerateReqInput:
             return_text_in_logprobs=self.return_text_in_logprobs,
             return_flat_raw_top_logprobs=self.return_flat_raw_top_logprobs,
             return_flat_raw_top_logprobs_b64=self.return_flat_raw_top_logprobs_b64,
-            return_compact_top_logprobs=self.return_compact_top_logprobs,
             binary_response=self.binary_response,
             stream=self.stream,
             log_metrics=self.log_metrics,
