@@ -4404,3 +4404,34 @@ class TestGrafterE2eExample:
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__]))
+
+
+def test_dumper_import_does_not_load_training_dependencies():
+    """A CPU rollout may import dumper configuration without CUDA training libs."""
+    import subprocess
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import importlib.abc
+import sys
+
+class RejectTrainingImports(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split('.')[0] in {'megatron', 'transformer_engine'}:
+            raise OSError(f'CPU rollout cannot load {fullname}: libcuda.so.1 unavailable')
+
+sys.meta_path.insert(0, RejectTrainingImports())
+from sglang.srt.debug_utils.dumper import DumperConfig, dumper
+assert not DumperConfig().enable
+assert not dumper.may_enable
+""",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        env={key: value for key, value in os.environ.items() if not key.startswith("DUMPER_")},
+    )
+    assert result.returncode == 0, result.stdout + result.stderr

@@ -1819,12 +1819,18 @@ class _SGLangPlugin(_FrameworkPlugin):
 
 
 class _MegatronPlugin(_FrameworkPlugin):
-    _available = True
-    try:
-        from megatron.core import parallel_state as _mpu
-        from megatron.core.packed_seq_params import PackedSeqParams
-    except ImportError:
-        _available = False
+    @cached_property
+    def _available(self) -> bool:
+        # CPU rollout clients also import the dumper. Load training dependencies
+        # only when Megatron-specific dump metadata is actually requested.
+        try:
+            from megatron.core import parallel_state
+            from megatron.core.packed_seq_params import PackedSeqParams
+        except ImportError:
+            return False
+        self._mpu = parallel_state
+        self.PackedSeqParams = PackedSeqParams
+        return True
 
     @property
     def name(self) -> str:
