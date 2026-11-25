@@ -456,7 +456,11 @@ class DetokenizerManager(MultiHttpWorkerDetokenizerMixin):
             if len(recv_obj.rids) > 0
             else []
         )
-        routed_experts = self._b64_encode_per_request(recv_obj.routed_experts)
+        # Keep routing bytes binary between processes; encode only for JSON clients.
+        routed_experts = (
+            [item.numpy().tobytes() if item is not None else None for item in recv_obj.routed_experts]
+            if recv_obj.routed_experts is not None else None
+        )
         indexer_topk = self._b64_encode_per_request(recv_obj.indexer_topk)
         return BatchStrOutput(
             rids=recv_obj.rids,

@@ -208,6 +208,7 @@ pub fn should_forward_request_header(name: &str) -> bool {
     const REQUEST_ID_PREFIX: &str = "x-request-id-";
 
     name.eq_ignore_ascii_case("authorization")
+        || name.eq_ignore_ascii_case("accept")
         || name.eq_ignore_ascii_case("x-request-id")
         || name.eq_ignore_ascii_case("x-correlation-id")
         || name.eq_ignore_ascii_case("traceparent")
@@ -289,7 +290,6 @@ mod tests {
         assert!(!should_forward_request_header("Host"));
         assert!(!should_forward_request_header("connection"));
         assert!(!should_forward_request_header("transfer-encoding"));
-        assert!(!should_forward_request_header("accept"));
         assert!(!should_forward_request_header("accept-encoding"));
         assert!(!should_forward_request_header("user-agent"));
         assert!(!should_forward_request_header("cookie"));

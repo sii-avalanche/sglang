@@ -307,6 +307,9 @@ class ReqState:
     output_token_sampling_logprobs: List[Union[float, List[float]]] = dataclasses.field(
         default_factory=list
     )
+    output_token_sampling_mask_chunks: List[Any] = dataclasses.field(
+        default_factory=list
+    )
 
     # Cached flat-format prompt top logprob fields; rebuilt only when more
     # prefill chunks arrive, so streaming decode chunks reuse the payload.
@@ -422,9 +425,49 @@ def _encode_output_top_logprobs(values, indices, width):
             raise ValueError("Invalid candidate width")
         ids[row, :len(tokens)] = tokens
         logps[row, :len(scores)] = scores
-    return {"version": 1, "shape": [len(values), width],
-            "ids_i32_le": pybase64.b64encode(ids.tobytes()).decode("ascii"),
-            "logps_f32_le": pybase64.b64encode(logps.tobytes()).decode("ascii")}
+    return {
+        "version": 1,
+        "shape": [len(values), width],
+        "ids_i32_le": ids.tobytes(),
+        "logps_f32_le": logps.tobytes(),
+    }
+
+
+def _encode_sampling_mask(chunks, support_logprobs: bool):
+    """Versioned little-endian CSR buffers for output_token_sampling_mask and logprobs."""
+    if not chunks:
+        lengths = np.empty(0, dtype="<i4")
+        token_ids = np.empty(0, dtype="<i4")
+        logprobs = np.empty(0, dtype="<f4")
+    elif len(chunks) == 1:
+        chunk = chunks[0]
+        lengths = np.ascontiguousarray(chunk.lengths, dtype="<i4")
+        token_ids = np.ascontiguousarray(chunk.token_ids, dtype="<i4")
+        logprobs = np.ascontiguousarray(chunk.logprobs, dtype="<f4")
+    else:
+        lengths = np.ascontiguousarray(
+            np.concatenate([c.lengths for c in chunks]), dtype="<i4"
+        )
+        token_ids = np.ascontiguousarray(
+            np.concatenate([c.token_ids for c in chunks]), dtype="<i4"
+        )
+        logprobs = np.ascontiguousarray(
+            np.concatenate([c.logprobs for c in chunks]), dtype="<f4"
+        )
+    num_rows = int(lengths.size)
+    mask_payload = {
+        "version": 1,
+        "num_rows": num_rows,
+        "lengths_i32_le": lengths.tobytes(),
+        "ids_i32_le": token_ids.tobytes(),
+    }
+    logprobs_payload = {
+        "version": 1,
+        "mode": "support" if support_logprobs else "selected",
+        "num_rows": num_rows,
+        "logps_f32_le": logprobs.tobytes(),
+    }
+    return mask_payload, logprobs_payload, num_rows
 
 
 class InputFormat(Enum):
@@ -2507,21 +2550,39 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
                 and state.obj.return_sampling_mask
             ):
                 output_sampling_mask = recv_obj.output_token_sampling_mask
-                if output_sampling_mask is not None:
-                    masks, logprobs = output_sampling_mask[i].to_lists(
-                        support_logprobs=state.obj.sampling_logprobs_mode == "support"
-                    )
-                    state.output_token_sampling_mask.extend(masks)
-                    state.output_token_sampling_logprobs.extend(logprobs)
-                    meta_info["output_token_sampling_mask"] = (
-                        state.output_token_sampling_mask
-                    )
-                    meta_info["output_token_sampling_logprobs"] = (
-                        state.output_token_sampling_logprobs
-                    )
-                    meta_info["output_token_sampling_mask_length"] = len(
-                        state.output_token_sampling_mask
-                    )
+                if output_sampling_mask is not None and output_sampling_mask[i] is not None:
+                    support_logprobs = state.obj.sampling_logprobs_mode == "support"
+                    if state.obj.binary_response:
+                        state.output_token_sampling_mask_chunks.append(
+                            output_sampling_mask[i]
+                        )
+                        if recv_obj.finished_reasons[i] is not None:
+                            mask_payload, logprobs_payload, mask_len = (
+                                _encode_sampling_mask(
+                                    state.output_token_sampling_mask_chunks,
+                                    support_logprobs=support_logprobs,
+                                )
+                            )
+                            meta_info["output_token_sampling_mask"] = mask_payload
+                            meta_info["output_token_sampling_logprobs"] = (
+                                logprobs_payload
+                            )
+                            meta_info["output_token_sampling_mask_length"] = mask_len
+                    else:
+                        masks, logprobs = output_sampling_mask[i].to_lists(
+                            support_logprobs=support_logprobs
+                        )
+                        state.output_token_sampling_mask.extend(masks)
+                        state.output_token_sampling_logprobs.extend(logprobs)
+                        meta_info["output_token_sampling_mask"] = (
+                            state.output_token_sampling_mask
+                        )
+                        meta_info["output_token_sampling_logprobs"] = (
+                            state.output_token_sampling_logprobs
+                        )
+                        meta_info["output_token_sampling_mask_length"] = len(
+                            state.output_token_sampling_mask
+                        )
 
             if not isinstance(recv_obj, BatchEmbeddingOutput):
                 meta_info.update(
@@ -2576,10 +2637,10 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
             if getattr(recv_obj, "routed_experts", None):
                 val = recv_obj.routed_experts[i]
                 if val is not None:
-                    # BatchStrOutput is pre-encoded by the detokenizer;
-                    # BatchTokenIDOutput (skip_tokenizer_init) bypasses it.
                     if isinstance(val, torch.Tensor):
-                        val = pybase64.b64encode(val.numpy().tobytes()).decode("utf-8")
+                        val = val.numpy().tobytes()
+                    if isinstance(val, bytes) and not state.obj.binary_response:
+                        val = pybase64.b64encode(val).decode("ascii")
                     meta_info["routed_experts"] = val
             if getattr(recv_obj, "indexer_topk", None):
                 val = recv_obj.indexer_topk[i]
@@ -2888,9 +2949,11 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
                         )
                     )
                 meta_info["input_top_logprobs"] = state.input_top_logprobs
-            if getattr(state.obj, "return_compact_top_logprobs", False):
-                meta_info["output_top_logprobs_compact"] = _encode_output_top_logprobs(
-                    state.output_top_logprobs_val, state.output_top_logprobs_idx, top_logprobs_num
+            if state.obj.binary_response and not return_text_in_logprobs:
+                meta_info["output_top_logprobs"] = _encode_output_top_logprobs(
+                    state.output_top_logprobs_val,
+                    state.output_top_logprobs_idx,
+                    top_logprobs_num,
                 )
             else:
                 if len(state.output_top_logprobs_val) > len(state.output_top_logprobs):

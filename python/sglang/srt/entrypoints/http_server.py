@@ -46,6 +46,8 @@ import orjson
 import requests
 import uvicorn
 import uvloop
+import msgpack
+
 from fastapi import (
     Body,
     Depends,
@@ -915,6 +917,8 @@ if os.environ.get("DUMPER_SERVER_PORT") == "reuse":
 )
 async def generate_request(obj: GenerateReqInput, request: Request):
     """Handle a generate request."""
+    # HTTP negotiation owns the wire format; ignore a body-supplied value.
+    obj.binary_response = not obj.stream and request.headers.get("accept") == "application/msgpack"
     if envs.SGLANG_ENABLE_REQUEST_HEADER_OVERRIDES.get():
         apply_header_overrides(obj, request.headers)
     if obj.stream:
@@ -955,6 +959,8 @@ async def generate_request(obj: GenerateReqInput, request: Request):
             ret = await _global_state.tokenizer_manager.generate_request(
                 obj, request
             ).__anext__()
+            if obj.binary_response:
+                return Response(msgpack.packb(ret, use_bin_type=True), media_type="application/msgpack")
             return orjson_response(ret)
         except ValueError as e:
             logger.error(f"[http_server] Error: {e}")
