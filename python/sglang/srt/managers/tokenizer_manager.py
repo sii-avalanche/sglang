@@ -307,6 +307,9 @@ class ReqState:
     output_token_sampling_logprobs: List[Union[float, List[float]]] = dataclasses.field(
         default_factory=list
     )
+    output_token_sampling_mask_chunks: List[Any] = dataclasses.field(
+        default_factory=list
+    )
 
     # Cached flat-format prompt top logprob fields; rebuilt only when more
     # prefill chunks arrive, so streaming decode chunks reuse the payload.
@@ -428,6 +431,43 @@ def _encode_output_top_logprobs(values, indices, width):
         "ids_i32_le": ids.tobytes(),
         "logps_f32_le": logps.tobytes(),
     }
+
+
+def _encode_sampling_mask(chunks, support_logprobs: bool):
+    """Versioned little-endian CSR buffers for output_token_sampling_mask and logprobs."""
+    if not chunks:
+        lengths = np.empty(0, dtype="<i4")
+        token_ids = np.empty(0, dtype="<i4")
+        logprobs = np.empty(0, dtype="<f4")
+    elif len(chunks) == 1:
+        chunk = chunks[0]
+        lengths = np.ascontiguousarray(chunk.lengths, dtype="<i4")
+        token_ids = np.ascontiguousarray(chunk.token_ids, dtype="<i4")
+        logprobs = np.ascontiguousarray(chunk.logprobs, dtype="<f4")
+    else:
+        lengths = np.ascontiguousarray(
+            np.concatenate([c.lengths for c in chunks]), dtype="<i4"
+        )
+        token_ids = np.ascontiguousarray(
+            np.concatenate([c.token_ids for c in chunks]), dtype="<i4"
+        )
+        logprobs = np.ascontiguousarray(
+            np.concatenate([c.logprobs for c in chunks]), dtype="<f4"
+        )
+    num_rows = int(lengths.size)
+    mask_payload = {
+        "version": 1,
+        "num_rows": num_rows,
+        "lengths_i32_le": lengths.tobytes(),
+        "ids_i32_le": token_ids.tobytes(),
+    }
+    logprobs_payload = {
+        "version": 1,
+        "mode": "support" if support_logprobs else "selected",
+        "num_rows": num_rows,
+        "logps_f32_le": logprobs.tobytes(),
+    }
+    return mask_payload, logprobs_payload, num_rows
 
 
 class InputFormat(Enum):
@@ -2510,21 +2550,39 @@ class TokenizerManager(TokenizerControlMixin, TokenizerManagerScoreMixin):
                 and state.obj.return_sampling_mask
             ):
                 output_sampling_mask = recv_obj.output_token_sampling_mask
-                if output_sampling_mask is not None:
-                    masks, logprobs = output_sampling_mask[i].to_lists(
-                        support_logprobs=state.obj.sampling_logprobs_mode == "support"
-                    )
-                    state.output_token_sampling_mask.extend(masks)
-                    state.output_token_sampling_logprobs.extend(logprobs)
-                    meta_info["output_token_sampling_mask"] = (
-                        state.output_token_sampling_mask
-                    )
-                    meta_info["output_token_sampling_logprobs"] = (
-                        state.output_token_sampling_logprobs
-                    )
-                    meta_info["output_token_sampling_mask_length"] = len(
-                        state.output_token_sampling_mask
-                    )
+                if output_sampling_mask is not None and output_sampling_mask[i] is not None:
+                    support_logprobs = state.obj.sampling_logprobs_mode == "support"
+                    if state.obj.binary_response:
+                        state.output_token_sampling_mask_chunks.append(
+                            output_sampling_mask[i]
+                        )
+                        if recv_obj.finished_reasons[i] is not None:
+                            mask_payload, logprobs_payload, mask_len = (
+                                _encode_sampling_mask(
+                                    state.output_token_sampling_mask_chunks,
+                                    support_logprobs=support_logprobs,
+                                )
+                            )
+                            meta_info["output_token_sampling_mask"] = mask_payload
+                            meta_info["output_token_sampling_logprobs"] = (
+                                logprobs_payload
+                            )
+                            meta_info["output_token_sampling_mask_length"] = mask_len
+                    else:
+                        masks, logprobs = output_sampling_mask[i].to_lists(
+                            support_logprobs=support_logprobs
+                        )
+                        state.output_token_sampling_mask.extend(masks)
+                        state.output_token_sampling_logprobs.extend(logprobs)
+                        meta_info["output_token_sampling_mask"] = (
+                            state.output_token_sampling_mask
+                        )
+                        meta_info["output_token_sampling_logprobs"] = (
+                            state.output_token_sampling_logprobs
+                        )
+                        meta_info["output_token_sampling_mask_length"] = len(
+                            state.output_token_sampling_mask
+                        )
 
             if not isinstance(recv_obj, BatchEmbeddingOutput):
                 meta_info.update(
