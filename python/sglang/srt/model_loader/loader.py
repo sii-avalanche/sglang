@@ -328,6 +328,25 @@ def _modules_with_quant_method(model: nn.Module):
             yield module, quant_method
 
 
+def _postprocess_online_fp8_for_reload(module, quant_method):
+    """Keep the loader parameters and stable inference buffers across full updates."""
+    if not hasattr(module, "_fp8_reload_params"):
+        module._fp8_reload_params = dict(module._parameters)
+        quant_method.process_weights_after_loading(module)
+        module._fp8_inference_params = dict(module._parameters)
+        return
+
+    quant_method.process_weights_after_loading(module)
+    with torch.no_grad():
+        for name, dest in module._fp8_inference_params.items():
+            src = module._parameters[name]
+            if src is not dest:
+                if src.shape != dest.shape or src.dtype != dest.dtype:
+                    raise RuntimeError(f"Online FP8 reload changed layout for {name}")
+                dest.copy_(src)
+                setattr(module, name, dest)
+
+
 class BaseModelLoader(ABC):
     """Base class for model loaders."""
 
@@ -1078,12 +1097,30 @@ class DefaultModelLoader(BaseModelLoader):
             # case where cpu offloading is used, where we will move the
             # parameters onto device for processing and back off after.
             with device_loading_context(module, target_device):
+                if os.environ.get("AVATRAIN_FP8_RELOAD") == "1":
+                    from sglang.srt.layers.quantization.fp8 import (
+                        Fp8LinearMethod,
+                        Fp8MoEMethod,
+                    )
+
+                    if isinstance(
+                        quant_method, (Fp8LinearMethod, Fp8MoEMethod)
+                    ) and not (
+                        quant_method.block_quant
+                        or quant_method.quant_config.is_checkpoint_fp8_serialized
+                    ):
+                        _postprocess_online_fp8_for_reload(module, quant_method)
+                        continue
                 quant_method.process_weights_after_loading(module)
 
     @staticmethod
     def restore_weights_before_loading(model, target_device):
         """Undo in-place quant packing so fresh weights can be loaded."""
         for module, quant_method in _modules_with_quant_method(model):
+            if hasattr(module, "_fp8_reload_params"):
+                for name, param in module._fp8_reload_params.items():
+                    setattr(module, name, param)
+                continue
             # AMX packing and the MXFP4 backend wrappers are duck-typed and cannot restore
             if isinstance(quant_method, QuantizeMethodBase):
                 with device_loading_context(module, target_device):
